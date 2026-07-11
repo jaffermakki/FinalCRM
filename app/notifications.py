@@ -124,3 +124,7 @@ def _receipt_html(shop_name, shop_address, shop_phone, invoice):
           <td style="text-align:right;color:#1e5c3a;font-weight:bold;font-size:16px;padding-top:8px;border-top:1px solid #e8e2d9">${invoice.total:.2f}</td></tr>
     </table>
     <div style="margin-top:26px;padding-top:16px;border-top:1px solid #e8e2d9;text-align:center;color:#9a9284;font-size:12px">
+      Thank you for your business!
+    </div>
+  </div>
+</div>"""
