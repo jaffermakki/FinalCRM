@@ -191,6 +191,7 @@ def _receipt_html(shop_name, shop_address, shop_phone, invoice):
     <!-- Footer -->
     <div style="border-top: 1px solid #dee2e6; padding-top: 20px; font-size: 12px; color: #6c757d; text-align: center;">
         <p style="margin: 0 0 8px 0; font-weight: 600; font-size: 14px; color: #495057;">Thank you for choosing {shop_name}</p>
+        <p style="margin: 0 0 8px 0; font-weight: bold; font-size: 13px; color: #212529;">NO REFUND EXCHANGE ONLY</p>
         <p style="margin: 0;">This invoice is designed to be printed minimally consider saving digitally where possible</p>
     </div>
 </div>"""
@@ -226,6 +227,7 @@ Discount: -${invoice.discount:.2f}
 Tax: ${invoice.tax_total:.2f}
 Total: ${invoice.total:.2f}
 
+NO REFUND EXCHANGE ONLY
 Thank you for your business!
 """
 
