@@ -161,3 +161,24 @@ def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, s
             return True, base + warning
         return True, base + " If it doesn't arrive within a few minutes, check spam/junk."
     return False, detail
+
+def send_sms(db, to_phone: str, message: str, get_setting) -> tuple[bool, str]:
+    sid = get_setting(db, "twilio_sid", "")
+    token = decrypt_value(get_setting(db, "twilio_token", ""))
+    from_phone = get_setting(db, "twilio_from", "")
+
+    if not (sid and token and from_phone):
+        return False, "SMS is not configured — go to Settings → Notifications to set up Twilio."
+
+    try:
+        resp = httpx.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            auth=(sid, token),
+            data={"From": from_phone, "To": to_phone, "Body": message},
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            return True, "SMS sent successfully."
+        return False, f"Twilio error ({resp.status_code}): {resp.text[:200]}"
+    except Exception as e:
+        return False, f"Failed to send SMS: {e}"
