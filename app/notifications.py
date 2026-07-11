@@ -138,4 +138,7 @@ def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, s
     from_addr = get_setting(db, "smtp_from", "") or user
 
     if not (host and user and password):
-        return False, "Email is not configured
+        return False, "Email is not configured — go to Settings → Notifications."
+
+    shop_name = get_setting(db, "shop_name", "Your Shop")
+    shop_address = get_setting(db
