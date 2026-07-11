@@ -114,7 +114,7 @@ def _receipt_html(shop_name, shop_address, shop_phone, invoice):
       {addr_line}{phone_line}
     </div>
     <div style="font-size:13px;color:#7a7060;margin-bottom:4px">Receipt for</div>
-    <div style="font-size:16px;color:#2c2c2c;margin-bottom:20px">Invoice {invoice.number} &nbsp;·&nbsp; {invoice.date.strftime('%b %d, %Y')}</div>
+    <div style="font-size:16px;color:#2c2c2c;margin-bottom:20px">Invoice {invoice.number} · {invoice.date.strftime('%b %d, %Y')}</div>
     <table style="width:100%;border-collapse:collapse;font-size:13px">{rows}</table>
     <table style="width:100%;margin-top:14px;font-size:13px">
       <tr><td style="color:#7a7060;padding:2px 0">Subtotal</td><td style="text-align:right;color:#2c2c2c">${invoice.subtotal:.2f}</td></tr>
@@ -141,4 +141,46 @@ def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, s
         return False, "Email is not configured — go to Settings → Notifications."
 
     shop_name = get_setting(db, "shop_name", "Your Shop")
-    shop_address = get_setting(db
+    shop_address = get_setting(db, "shop_address", "")
+    shop_phone = get_setting(db, "shop_phone", "")
+    
+    # 1. Complete the cut-off plain text generation
+    lines_text = "\n".join(
+        f"{l.name} x{l.qty} ... ${l.price * l.qty:.2f}" 
+        for l in invoice.lines
+    )
+    
+    plain_body = f"""Receipt from {shop_name}
+Invoice {invoice.number} · {invoice.date.strftime('%b %d, %Y')}
+
+{lines_text}
+
+Subtotal: ${invoice.subtotal:.2f}
+Discount: -${invoice.discount:.2f}
+Tax: ${invoice.tax_total:.2f}
+Total: ${invoice.total:.2f}
+
+Thank you for your business!
+"""
+
+    # 2. Generate the HTML body using your existing helper
+    html_body = _receipt_html(shop_name, shop_address, shop_phone, invoice)
+
+    # 3. Assemble the multipart email
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Receipt from {shop_name} (Invoice {invoice.number})"
+    msg["From"] = from_addr
+    msg["To"] = to_email
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    
+    # Attach plain text first, then HTML (standard for "alternative" MIME types)
+    msg.attach(MIMEText(plain_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    # 4. Send the email
+    ok, detail = _send_via_smtp(host, int(port) if port else 0, user, password, msg)
+    
+    if ok:
+        return True, "Receipt accepted." + _from_address_warning(user, from_addr)
+    return False, detail
