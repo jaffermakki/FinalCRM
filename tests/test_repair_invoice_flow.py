@@ -77,3 +77,39 @@ def test_manual_advance_to_collected_without_charging_still_works(owner_client, 
 
     invoice = db_session.query(Invoice).filter(Invoice.repair_id == repair.id).first()
     assert invoice is None, "no invoice should exist for a repair collected without charging"
+
+
+def test_checkout_recovers_from_invoice_number_collision(owner_client, db_session):
+    """Simulates two checkouts racing for the same invoice number: pre-insert
+    an invoice using the number the counter is about to hand out next, then
+    check out for real. The checkout must still succeed — with a different,
+    unique number — instead of crashing with a raw database error."""
+    from app.models import Setting, Product
+    from app.main import get_setting
+
+    prefix = get_setting(db_session, "invoice_prefix", "INV")
+    counter = int(get_setting(db_session, "invoice_counter", "1000"))
+    colliding_number = f"{prefix}-{counter}"
+
+    db_session.add(Invoice(number=colliding_number, staff_id=None, payment_method="Cash",
+                            subtotal=1, tax_total=0, total=1))
+    db_session.commit()
+
+    product = db_session.query(Product).filter(Product.stock > 0).first()
+    owner_client.post("/pos/clear")
+    owner_client.post("/pos/add-custom", data={"product_id": product.id, "custom_price": "10.00"})
+
+    resp = owner_client.post("/pos/checkout", data={
+        "payment_method": "Cash", "tendered": "20.00",
+    }, follow_redirects=False)
+
+    assert resp.status_code == 303, "checkout must succeed despite the collision, not 500"
+    assert resp.headers["location"].startswith("/invoices/")
+    new_invoice_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    db_session.expire_all()
+    new_invoice = db_session.get(Invoice, new_invoice_id)
+    assert new_invoice.number != colliding_number, "must not have reused the colliding number"
+    assert new_invoice.number.startswith(prefix)
+
+    owner_client.post("/pos/clear")

@@ -36,7 +36,7 @@
 {% endif %}
 
 {% if staff.role in ['owner','manager'] %}
-<div class="card" id="new-product-panel" style="display:none">
+<div class="card collapsible-panel" id="new-product-panel">
   <h2>Add Product</h2>
   <form method="post" action="/products/add" class="form-row" style="align-items:flex-end;flex-wrap:wrap">
     <div class="form-group"><label>SKU</label><input name="sku" required></div>

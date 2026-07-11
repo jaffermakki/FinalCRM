@@ -7,42 +7,23 @@ import httpx
 from .encryption import decrypt_value
 
 
-def _send_via_smtp(host: str, port: int, user: str, password: str, msg: MIMEMultipart) -> tuple[bool, str]:
-    """Shared low-level sender. Returns (success, message)."""
+def _send_via_smtp(host: str, port: int, user: str, password: str, msg: MIMEText) -> tuple[bool, str]:
+    """Shared low-level sender. Returns (success, message). Auto-selects
+    SSL vs STARTTLS based on port, since using the wrong one for a given
+    port is a common reason mail silently fails to send or arrives never."""
     try:
-        # Special case: Brevo API mode
-        if host == "brevo_api":
-            api_key = password
-            url = "https://api.brevo.com/v3/smtp/email"
-            headers = {"api-key": api_key, "Content-Type": "application/json"}
-
-            # Extract plain and HTML parts
-            html_body = None
-            plain_body = None
-            for part in msg.walk():
-                if part.get_content_type() == "text/html":
-                    html_body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8")
-                elif part.get_content_type() == "text/plain":
-                    plain_body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8")
-
-            payload = {
-                "sender": {"name": msg["From"], "email": msg["From"]},
-                "to": [{"email": msg["To"]}],
-                "subject": msg["Subject"],
-                "htmlContent": html_body or plain_body or ""
-            }
-            resp = httpx.post(url, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 201:
-                return True, "Email sent successfully via Brevo API."
-            return False, f"Brevo error ({resp.status_code}): {resp.text[:200]}"
-
-        # Normal SMTP path
         if port == 465:
+            # Port 465 = implicit TLS from the start of the connection.
+            # Using regular SMTP+starttls() here (the previous behavior,
+            # regardless of port) does not speak the protocol port 465
+            # expects and can hang, time out, or be rejected by the server.
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(host, port, timeout=15, context=context) as server:
                 server.login(user, password)
                 refused = server.send_message(msg)
         else:
+            # Port 587 (or 25 with STARTTLS support) = plaintext connection
+            # that upgrades to TLS via STARTTLS.
             with smtplib.SMTP(host, port, timeout=15) as server:
                 server.ehlo()
                 server.starttls(context=ssl.create_default_context())
@@ -51,6 +32,10 @@ def _send_via_smtp(host: str, port: int, user: str, password: str, msg: MIMEMult
                 refused = server.send_message(msg)
 
         if refused:
+            # send_message() returns a dict of {recipient: (code, reason)}
+            # for any address the server didn't accept. The previous code
+            # never checked this, so a server-side rejection of the
+            # recipient still reported "sent successfully" back to staff.
             reasons = "; ".join(f"{addr}: {info}" for addr, info in refused.items())
             return False, f"Server rejected the recipient: {reasons}"
         return True, "Email accepted by the mail server."
@@ -63,11 +48,19 @@ def _send_via_smtp(host: str, port: int, user: str, password: str, msg: MIMEMult
 
 
 def _from_address_warning(user: str, from_addr: str) -> str:
+    """Flags the #1 real-world cause of 'sent successfully but never
+    arrives': sending with a From address on a different domain than the
+    authenticated SMTP account. Gmail/Outlook/etc. often accept the
+    message at the SMTP level, then silently drop or spam-filter it on
+    the receiving end because SPF/DKIM don't match. The SMTP protocol
+    has no way to surface this to the sender — it just vanishes."""
     def domain(addr):
         return addr.split("@")[-1].lower().strip() if "@" in addr else ""
     if from_addr and user and domain(from_addr) != domain(user):
         return (f" Note: your From address ({from_addr}) is on a different domain than "
-                f"your SMTP login ({user}) — many providers silently drop mail like this.")
+                f"your SMTP login ({user}) — many providers silently drop mail like this "
+                f"due to SPF/DKIM mismatches. Set From Address to the same address as "
+                f"SMTP Username in Settings, or leave From Address blank to use it automatically.")
     return ""
 
 
@@ -78,122 +71,53 @@ def send_plain_email(db, to_email: str, subject: str, body: str, get_setting) ->
     password = decrypt_value(get_setting(db, "smtp_password", ""))
     from_addr = get_setting(db, "smtp_from", "") or user
 
-    if not (host and user and password):
-        return False, "Email is not configured — go to Settings → Notifications."
+    if not (host and port and user and password):
+        return False, "Email is not configured — go to Settings → Notifications to set up SMTP."
 
-    msg = MIMEMultipart("alternative")
+    msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = from_addr
     msg["To"] = to_email
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-    msg.attach(MIMEText(body, "plain"))
-    msg.attach(MIMEText(body, "html"))
 
-    ok, detail = _send_via_smtp(host, int(port) if port else 0, user, password, msg)
+    ok, detail = _send_via_smtp(host, int(port), user, password, msg)
     if ok:
-        return True, "Email accepted." + _from_address_warning(user, from_addr)
+        return True, "Email accepted by the mail server." + _from_address_warning(user, from_addr)
     return False, detail
 
 
 def _receipt_html(shop_name, shop_address, shop_phone, invoice):
-    # Format the line items to match the layout
     rows = "".join(
-        f'<tr>'
-        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333;">{l.name}</td>'
-        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333; text-align:center;">{l.qty}</td>'
-        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333; text-align:right;">${l.price:.2f}</td>'
-        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333; text-align:right;">${(l.price * l.qty):.2f}</td>'
-        f'</tr>'
+        f'<tr><td style="padding:8px 0;border-bottom:1px solid #e8e2d9;color:#2c2c2c">{l.name} '
+        f'<span style="color:#9a9284">×{l.qty}</span></td>'
+        f'<td style="padding:8px 0;border-bottom:1px solid #e8e2d9;text-align:right;color:#2c2c2c">'
+        f'${l.price * l.qty:.2f}</td></tr>'
         for l in invoice.lines
     )
-    
-    addr_line = f'<div>{shop_address}</div>' if shop_address else ""
-    phone_line = f'<div>{shop_phone}</div>' if shop_phone else ""
-    
-    # Fallbacks in case your invoice model doesn't store these exact properties yet
-    customer_name = getattr(invoice, "customer_name", "Walk-in")
-    payment_method = getattr(invoice, "payment_method", "Cash")
-
+    addr_line = f'<div style="color:#7a7060;font-size:12px;margin-top:4px">{shop_address}</div>' if shop_address else ""
+    phone_line = f'<div style="color:#7a7060;font-size:12px">{shop_phone}</div>' if shop_phone else ""
     return f"""\
-<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333; border: 1px solid #eaeaea; padding: 30px; background-color: #ffffff;">
-    
-    <!-- Header -->
-    <div style="margin-bottom: 30px;">
-        <h2 style="margin: 0 0 5px 0; color: #000; font-size: 24px;">{shop_name}</h2>
-        <div style="color: #666; font-size: 14px; line-height: 1.5;">
-            {addr_line}
-            {phone_line}
-        </div>
+<div style="background:#f4f1ea;padding:28px 12px;font-family:Georgia,'Times New Roman',serif">
+  <div style="max-width:520px;margin:0 auto;background:#fdfcf9;border:1px solid #e8e2d9;padding:32px 30px">
+    <div style="border-bottom:2px solid #1e5c3a;padding-bottom:16px;margin-bottom:20px">
+      <div style="font-size:20px;font-weight:bold;color:#1e5c3a">{shop_name}</div>
+      {addr_line}{phone_line}
     </div>
-
-    <!-- Top Summary Table -->
-    <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px; font-size: 14px; background-color: #f8f9fa;">
-        <thead>
-            <tr>
-                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">INVOICE #</th>
-                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">DATE</th>
-                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">PAYMENT</th>
-                <th style="padding: 12px; text-align: right; border-bottom: 2px solid #dee2e6; color: #495057;">TOTAL</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td style="padding: 12px; font-weight: 600; color: #212529;">{invoice.number}</td>
-                <td style="padding: 12px; color: #212529;">{invoice.date.strftime('%B %d, %Y')}</td>
-                <td style="padding: 12px; color: #212529;">{payment_method}</td>
-                <td style="padding: 12px; text-align: right; font-weight: 600; color: #212529;">${invoice.total:.2f}</td>
-            </tr>
-        </tbody>
+    <div style="font-size:13px;color:#7a7060;margin-bottom:4px">Receipt for</div>
+    <div style="font-size:16px;color:#2c2c2c;margin-bottom:20px">Invoice {invoice.number} &nbsp;·&nbsp; {invoice.date.strftime('%b %d, %Y')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">{rows}</table>
+    <table style="width:100%;margin-top:14px;font-size:13px">
+      <tr><td style="color:#7a7060;padding:2px 0">Subtotal</td><td style="text-align:right;color:#2c2c2c">${invoice.subtotal:.2f}</td></tr>
+      <tr><td style="color:#7a7060;padding:2px 0">Discount</td><td style="text-align:right;color:#2c2c2c">-${invoice.discount:.2f}</td></tr>
+      <tr><td style="color:#7a7060;padding:2px 0">Tax</td><td style="text-align:right;color:#2c2c2c">${invoice.tax_total:.2f}</td></tr>
+      <tr><td style="color:#1e5c3a;font-weight:bold;font-size:16px;padding-top:8px;border-top:1px solid #e8e2d9">Total</td>
+          <td style="text-align:right;color:#1e5c3a;font-weight:bold;font-size:16px;padding-top:8px;border-top:1px solid #e8e2d9">${invoice.total:.2f}</td></tr>
     </table>
-
-    <!-- Bill To -->
-    <div style="margin-bottom: 25px; font-size: 14px;">
-        <strong style="color: #495057;">BILL TO</strong><br>
-        <span style="color: #212529;">{customer_name}</span>
+    <div style="margin-top:26px;padding-top:16px;border-top:1px solid #e8e2d9;text-align:center;color:#9a9284;font-size:12px">
+      Thank you for your business!
     </div>
-
-    <!-- Line Items Table -->
-    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
-        <thead>
-            <tr>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">DESCRIPTION</th>
-                <th style="padding: 10px; text-align: center; border-bottom: 2px solid #dee2e6; color: #495057;">QTY</th>
-                <th style="padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6; color: #495057;">UNIT PRICE</th>
-                <th style="padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6; color: #495057;">AMOUNT</th>
-            </tr>
-        </thead>
-        <tbody>
-            {rows}
-        </tbody>
-    </table>
-
-    <!-- Totals Area -->
-    <div style="margin-bottom: 40px; display: table; width: 100%;">
-        <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin-left: auto;">
-            <tr>
-                <td style="padding: 6px 10px; text-align: right; width: 60%; color: #495057;">Subtotal</td>
-                <td style="padding: 6px 10px; text-align: right; width: 40%; color: #212529;">${invoice.subtotal:.2f}</td>
-            </tr>
-            <!-- Only show discount if it exists and is greater than 0 -->
-            {"<tr><td style='padding: 6px 10px; text-align: right; color: #495057;'>Discount</td><td style='padding: 6px 10px; text-align: right; color: #212529;'>-$" + f"{invoice.discount:.2f}" + "</td></tr>" if getattr(invoice, 'discount', 0) > 0 else ""}
-            <tr>
-                <td style="padding: 6px 10px; text-align: right; color: #495057;">Tax</td>
-                <td style="padding: 6px 10px; text-align: right; color: #212529;">${invoice.tax_total:.2f}</td>
-            </tr>
-            <tr>
-                <td style="padding: 12px 10px; text-align: right; font-weight: bold; border-top: 2px solid #dee2e6; font-size: 16px; color: #212529;">Total</td>
-                <td style="padding: 12px 10px; text-align: right; font-weight: bold; border-top: 2px solid #dee2e6; font-size: 16px; color: #212529;">${invoice.total:.2f}</td>
-            </tr>
-        </table>
-    </div>
-
-    <!-- Footer -->
-    <div style="border-top: 1px solid #dee2e6; padding-top: 20px; font-size: 12px; color: #6c757d; text-align: center;">
-        <p style="margin: 0 0 8px 0; font-weight: 600; font-size: 14px; color: #495057;">Thank you for choosing {shop_name}</p>
-        <p style="margin: 0 0 8px 0; font-weight: bold; font-size: 13px; color: #212529;">NO REFUND EXCHANGE ONLY</p>
-        <p style="margin: 0;">This invoice is designed to be printed minimally consider saving digitally where possible</p>
-    </div>
+  </div>
 </div>"""
 
 
@@ -204,59 +128,61 @@ def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, s
     password = decrypt_value(get_setting(db, "smtp_password", ""))
     from_addr = get_setting(db, "smtp_from", "") or user
 
-    if not (host and user and password):
-        return False, "Email is not configured — go to Settings → Notifications."
+    if not (host and port and user and password):
+        return False, "Email is not configured — go to Settings → Notifications to set up SMTP."
 
     shop_name = get_setting(db, "shop_name", "Your Shop")
     shop_address = get_setting(db, "shop_address", "")
     shop_phone = get_setting(db, "shop_phone", "")
-    
-    # 1. Complete the cut-off plain text generation
-    lines_text = "\n".join(
-        f"{l.name} x{l.qty} ... ${l.price * l.qty:.2f}" 
-        for l in invoice.lines
+    lines_text = "\n".join(f"{l.name} x{l.qty} — ${l.price * l.qty:.2f}" for l in invoice.lines)
+    text_body = (
+        f"Receipt from {shop_name}\n\n"
+        f"Invoice: {invoice.number}\n"
+        f"Date: {invoice.date.strftime('%b %d, %Y %H:%M')}\n\n"
+        f"{lines_text}\n\n"
+        f"Subtotal: ${invoice.subtotal:.2f}\n"
+        f"Discount: ${invoice.discount:.2f}\n"
+        f"Tax: ${invoice.tax_total:.2f}\n"
+        f"Total: ${invoice.total:.2f}\n\n"
+        f"Thank you for your business!"
     )
-    
-    plain_body = f"""Receipt from {shop_name}
-Invoice {invoice.number} · {invoice.date.strftime('%b %d, %Y')}
 
-{lines_text}
-
-Subtotal: ${invoice.subtotal:.2f}
-Discount: -${invoice.discount:.2f}
-Tax: ${invoice.tax_total:.2f}
-Total: ${invoice.total:.2f}
-
-NO REFUND EXCHANGE ONLY
-Thank you for your business!
-"""
-
-    # 2. Generate the HTML body using your existing helper
-    html_body = _receipt_html(shop_name, shop_address, shop_phone, invoice)
-
-    # 3. Assemble the multipart email
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Receipt from {shop_name} (Invoice {invoice.number})"
+    msg["Subject"] = f"Your receipt from {shop_name} — {invoice.number}"
     msg["From"] = from_addr
     msg["To"] = to_email
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
-    
-    # Attach plain text first, then HTML
-    msg.attach(MIMEText(plain_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(_receipt_html(shop_name, shop_address, shop_phone, invoice), "html"))
 
-    # 4. Send the email
-    ok, detail = _send_via_smtp(host, int(port) if port else 0, user, password, msg)
-    
+    ok, detail = _send_via_smtp(host, int(port), user, password, msg)
     if ok:
-        return True, "Receipt accepted." + _from_address_warning(user, from_addr)
+        warning = _from_address_warning(user, from_addr)
+        base = "Receipt accepted by the mail server."
+        if warning:
+            return True, base + warning
+        return True, base + " If it doesn't arrive within a few minutes, check spam/junk."
     return False, detail
 
 
 def send_sms(db, to_phone: str, message: str, get_setting) -> tuple[bool, str]:
-    """
-    Placeholder for SMS functionality.
-    """
-    # Just returns False right now so it doesn't break your app while you build it out.
-    return False, "SMS sending is not yet implemented in the codebase."
+    sid = get_setting(db, "twilio_sid", "")
+    token = decrypt_value(get_setting(db, "twilio_token", ""))
+    from_phone = get_setting(db, "twilio_from", "")
+
+    if not (sid and token and from_phone):
+        return False, "SMS is not configured — go to Settings → Notifications to set up Twilio."
+
+    try:
+        resp = httpx.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            auth=(sid, token),
+            data={"From": from_phone, "To": to_phone, "Body": message},
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            return True, "SMS sent successfully."
+        return False, f"Twilio error ({resp.status_code}): {resp.text[:200]}"
+    except Exception as e:
+        return False, f"Failed to send SMS: {e}"

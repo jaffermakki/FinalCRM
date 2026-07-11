@@ -30,6 +30,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 
 from .database import get_db, SessionLocal
 from .models import (Staff, Product, Customer, Repair, Invoice, InvoiceLine, AuditLog, Setting, HeldCart,
@@ -792,24 +793,44 @@ def pos_checkout(request: Request, payment_method: str = Form("Cash"),
     repair_ctx_id = request.session.get("pos_repair_id")
     repair_ctx = db.get(Repair, repair_ctx_id) if repair_ctx_id else None
 
-    invoice = Invoice(
-        number=next_invoice_number(db),
-        customer_id=customer.id if customer else None,
-        staff_id=staff.id,
-        repair_id=repair_ctx.id if repair_ctx else None,
-        payment_method=payment_method,
-        subtotal=totals["sub"],
-        discount=totals["disc"],
-        loyalty_pts_used=loyalty_pts_used,
-        store_credit_used=store_credit_used,
-        tendered=tendered,
-        change_given=change_given,
-        tax_breakdown=json.dumps(totals["tax"]["lines"]),
-        tax_total=totals["tax"]["tax_total"],
-        total=total,
-    )
-    db.add(invoice)
-    db.flush()
+    # Two checkouts completing at the exact same instant (two terminals, two
+    # staff) could theoretically read the same counter value before either
+    # writes it back. The database's unique constraint on `number` guarantees
+    # a duplicate can never actually be saved — this retry loop just makes
+    # sure that collision produces a fresh number instead of a failed sale.
+    # A fresh Invoice object is built each attempt rather than reusing one
+    # across a rollback, to avoid relying on SQLAlchemy's session-state
+    # behavior for an object involved in a failed flush — this is money, so
+    # the extra caution here is deliberate.
+    invoice = None
+    for attempt in range(5):
+        candidate = Invoice(
+            number=next_invoice_number(db),
+            customer_id=customer.id if customer else None,
+            staff_id=staff.id,
+            repair_id=repair_ctx.id if repair_ctx else None,
+            payment_method=payment_method,
+            subtotal=totals["sub"],
+            discount=totals["disc"],
+            loyalty_pts_used=loyalty_pts_used,
+            store_credit_used=store_credit_used,
+            tendered=tendered,
+            change_given=change_given,
+            tax_breakdown=json.dumps(totals["tax"]["lines"]),
+            tax_total=totals["tax"]["tax_total"],
+            total=total,
+        )
+        db.add(candidate)
+        try:
+            db.flush()
+            invoice = candidate
+            break
+        except IntegrityError:
+            db.rollback()
+            if attempt == 4:
+                raise
+    if invoice is None:
+        raise RuntimeError("Could not generate a unique invoice number after 5 attempts")
 
     for item in cart:
         db.add(InvoiceLine(invoice_id=invoice.id, product_id=item["product_id"],
