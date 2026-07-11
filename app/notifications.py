@@ -174,7 +174,7 @@ Thank you for your business!
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
     
-    # Attach plain text first, then HTML (standard for "alternative" MIME types)
+    # Attach plain text first, then HTML
     msg.attach(MIMEText(plain_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
@@ -184,3 +184,11 @@ Thank you for your business!
     if ok:
         return True, "Receipt accepted." + _from_address_warning(user, from_addr)
     return False, detail
+
+
+def send_sms(db, to_phone: str, message: str, get_setting) -> tuple[bool, str]:
+    """
+    Placeholder for SMS functionality.
+    """
+    # Just returns False right now so it doesn't break your app while you build it out.
+    return False, "SMS sending is not yet implemented in the codebase."
