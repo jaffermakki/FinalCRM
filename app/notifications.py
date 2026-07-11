@@ -7,19 +7,29 @@ import httpx
 from .encryption import decrypt_value
 
 
-def _send_via_smtp(host: str, port: int, user: str, password: str, msg: MIMEText) -> tuple[bool, str]:
+def _send_via_smtp(host: str, port: int, user: str, password: str, msg: MIMEMultipart) -> tuple[bool, str]:
     """Shared low-level sender. Returns (success, message)."""
     try:
         # Special case: Brevo API mode
         if host == "brevo_api":
-            api_key = password  # store Brevo API key in smtp_password field
+            api_key = password  # Brevo API key stored in smtp_password
             url = "https://api.brevo.com/v3/smtp/email"
             headers = {"api-key": api_key, "Content-Type": "application/json"}
+
+            # Extract plain and HTML parts
+            html_body = None
+            plain_body = None
+            for part in msg.walk():
+                if part.get_content_type() == "text/html":
+                    html_body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8")
+                elif part.get_content_type() == "text/plain":
+                    plain_body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8")
+
             payload = {
                 "sender": {"name": msg["From"], "email": msg["From"]},
                 "to": [{"email": msg["To"]}],
                 "subject": msg["Subject"],
-                "htmlContent": msg.as_string()
+                "htmlContent": html_body or plain_body or ""
             }
             resp = httpx.post(url, headers=headers, json=payload, timeout=30)
             if resp.status_code == 201:
@@ -71,12 +81,14 @@ def send_plain_email(db, to_email: str, subject: str, body: str, get_setting) ->
     if not (host and user and password):
         return False, "Email is not configured — go to Settings → Notifications."
 
-    msg = MIMEText(body, "html")
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = from_addr
     msg["To"] = to_email
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
+    msg.attach(MIMEText(body, "plain"))
+    msg.attach(MIMEText(body, "html"))
 
     ok, detail = _send_via_smtp(host, int(port) if port else 0, user, password, msg)
     if ok:
@@ -112,73 +124,3 @@ def _receipt_html(shop_name, shop_address, shop_phone, invoice):
           <td style="text-align:right;color:#1e5c3a;font-weight:bold;font-size:16px;padding-top:8px;border-top:1px solid #e8e2d9">${invoice.total:.2f}</td></tr>
     </table>
     <div style="margin-top:26px;padding-top:16px;border-top:1px solid #e8e2d9;text-align:center;color:#9a9284;font-size:12px">
-      Thank you for your business!
-    </div>
-  </div>
-</div>"""
-
-
-def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, str]:
-    host = get_setting(db, "smtp_host", "")
-    port = get_setting(db, "smtp_port", "")
-    user = get_setting(db, "smtp_user", "")
-    password = decrypt_value(get_setting(db, "smtp_password", ""))
-    from_addr = get_setting(db, "smtp_from", "") or user
-
-    if not (host and user and password):
-        return False, "Email is not configured — go to Settings → Notifications."
-
-    shop_name = get_setting(db, "shop_name", "Your Shop")
-    shop_address = get_setting(db, "shop_address", "")
-    shop_phone = get_setting(db, "shop_phone", "")
-    lines_text = "\n".join(f"{l.name} x{l.qty} — ${l.price * l.qty:.2f}" for l in invoice.lines)
-    text_body = (
-        f"Receipt from {shop_name}\n\n"
-        f"Invoice: {invoice.number}\n"
-        f"Date: {invoice.date.strftime('%b %d, %Y %H:%M')}\n\n"
-        f"{lines_text}\n\n"
-        f"Subtotal: ${invoice.subtotal:.2f}\n"
-        f"Discount: ${invoice.discount:.2f}\n"
-        f"Tax: ${invoice.tax_total:.2f}\n"
-        f"Total: ${invoice.total:.2f}\n\n"
-        f"Thank you for your business!"
-    )
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Your receipt from {shop_name} — {invoice.number}"
-    msg["From"] = from_addr
-    msg["To"] = to_email
-    msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid()
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(_receipt_html(shop_name, shop_address, shop_phone, invoice), "html"))
-
-    ok, detail = _send_via_smtp(host, int(port) if port else 0, user, password, msg)
-    if ok:
-        warning = _from_address_warning(user, from_addr)
-        base = "Receipt accepted by the mail server."
-        if warning:
-            return True, base + warning
-        return True, base + " If it doesn't arrive within a few minutes, check spam/junk."
-    return False, detail
-
-def send_sms(db, to_phone: str, message: str, get_setting) -> tuple[bool, str]:
-    sid = get_setting(db, "twilio_sid", "")
-    token = decrypt_value(get_setting(db, "twilio_token", ""))
-    from_phone = get_setting(db, "twilio_from", "")
-
-    if not (sid and token and from_phone):
-        return False, "SMS is not configured — go to Settings → Notifications to set up Twilio."
-
-    try:
-        resp = httpx.post(
-            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
-            auth=(sid, token),
-            data={"From": from_phone, "To": to_phone, "Body": message},
-            timeout=10,
-        )
-        if resp.status_code in (200, 201):
-            return True, "SMS sent successfully."
-        return False, f"Twilio error ({resp.status_code}): {resp.text[:200]}"
-    except Exception as e:
-        return False, f"Failed to send SMS: {e}"
