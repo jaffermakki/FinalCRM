@@ -138,4 +138,26 @@ def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, s
         f"Date: {invoice.date.strftime('%b %d, %Y %H:%M')}\n\n"
         f"{lines_text}\n\n"
         f"Subtotal: ${invoice.subtotal:.2f}\n"
-        
+        f"Discount: ${invoice.discount:.2f}\n"
+        f"Tax: ${invoice.tax_total:.2f}\n"
+        f"Total: ${invoice.total:.2f}\n\n"
+        f"Thank you for your business!"
+    )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Your receipt from {shop_name} — {invoice.number}"
+    msg["From"] = from_addr
+    msg["To"] = to_email
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(_receipt_html(shop_name, shop_address, shop_phone, invoice), "html"))
+
+    ok, detail = _send_via_smtp(host, int(port) if port else 0, user, password, msg)
+    if ok:
+        warning = _from_address_warning(user, from_addr)
+        base = "Receipt accepted by the mail server."
+        if warning:
+            return True, base + warning
+        return True, base + " If it doesn't arrive within a few minutes, check spam/junk."
+    return False, detail
