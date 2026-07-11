@@ -12,7 +12,7 @@ def _send_via_smtp(host: str, port: int, user: str, password: str, msg: MIMEMult
     try:
         # Special case: Brevo API mode
         if host == "brevo_api":
-            api_key = password  # Brevo API key stored in smtp_password
+            api_key = password
             url = "https://api.brevo.com/v3/smtp/email"
             headers = {"api-key": api_key, "Content-Type": "application/json"}
 
@@ -128,3 +128,14 @@ def _receipt_html(shop_name, shop_address, shop_phone, invoice):
     </div>
   </div>
 </div>"""
+
+
+def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, str]:
+    host = get_setting(db, "smtp_host", "")
+    port = get_setting(db, "smtp_port", "")
+    user = get_setting(db, "smtp_user", "")
+    password = decrypt_value(get_setting(db, "smtp_password", ""))
+    from_addr = get_setting(db, "smtp_from", "") or user
+
+    if not (host and user and password):
+        return False, "Email is not configured
