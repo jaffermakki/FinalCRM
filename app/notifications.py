@@ -97,36 +97,102 @@ def send_plain_email(db, to_email: str, subject: str, body: str, get_setting) ->
 
 
 def _receipt_html(shop_name, shop_address, shop_phone, invoice):
+    # Format the line items to match the layout
     rows = "".join(
-        f'<tr><td style="padding:8px 0;border-bottom:1px solid #e8e2d9;color:#2c2c2c">{l.name} '
-        f'<span style="color:#9a9284">×{l.qty}</span></td>'
-        f'<td style="padding:8px 0;border-bottom:1px solid #e8e2d9;text-align:right;color:#2c2c2c">'
-        f'${l.price * l.qty:.2f}</td></tr>'
+        f'<tr>'
+        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333;">{l.name}</td>'
+        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333; text-align:center;">{l.qty}</td>'
+        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333; text-align:right;">${l.price:.2f}</td>'
+        f'<td style="padding:10px; border-bottom:1px solid #eaeaea; color:#333; text-align:right;">${(l.price * l.qty):.2f}</td>'
+        f'</tr>'
         for l in invoice.lines
     )
-    addr_line = f'<div style="color:#7a7060;font-size:12px;margin-top:4px">{shop_address}</div>' if shop_address else ""
-    phone_line = f'<div style="color:#7a7060;font-size:12px">{shop_phone}</div>' if shop_phone else ""
+    
+    addr_line = f'<div>{shop_address}</div>' if shop_address else ""
+    phone_line = f'<div>{shop_phone}</div>' if shop_phone else ""
+    
+    # Fallbacks in case your invoice model doesn't store these exact properties yet
+    customer_name = getattr(invoice, "customer_name", "Walk-in")
+    payment_method = getattr(invoice, "payment_method", "Cash")
+
     return f"""\
-<div style="background:#f4f1ea;padding:28px 12px;font-family:Georgia,'Times New Roman',serif">
-  <div style="max-width:520px;margin:0 auto;background:#fdfcf9;border:1px solid #e8e2d9;padding:32px 30px">
-    <div style="border-bottom:2px solid #1e5c3a;padding-bottom:16px;margin-bottom:20px">
-      <div style="font-size:20px;font-weight:bold;color:#1e5c3a">{shop_name}</div>
-      {addr_line}{phone_line}
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333; border: 1px solid #eaeaea; padding: 30px; background-color: #ffffff;">
+    
+    <!-- Header -->
+    <div style="margin-bottom: 30px;">
+        <h2 style="margin: 0 0 5px 0; color: #000; font-size: 24px;">{shop_name}</h2>
+        <div style="color: #666; font-size: 14px; line-height: 1.5;">
+            {addr_line}
+            {phone_line}
+        </div>
     </div>
-    <div style="font-size:13px;color:#7a7060;margin-bottom:4px">Receipt for</div>
-    <div style="font-size:16px;color:#2c2c2c;margin-bottom:20px">Invoice {invoice.number} · {invoice.date.strftime('%b %d, %Y')}</div>
-    <table style="width:100%;border-collapse:collapse;font-size:13px">{rows}</table>
-    <table style="width:100%;margin-top:14px;font-size:13px">
-      <tr><td style="color:#7a7060;padding:2px 0">Subtotal</td><td style="text-align:right;color:#2c2c2c">${invoice.subtotal:.2f}</td></tr>
-      <tr><td style="color:#7a7060;padding:2px 0">Discount</td><td style="text-align:right;color:#2c2c2c">-${invoice.discount:.2f}</td></tr>
-      <tr><td style="color:#7a7060;padding:2px 0">Tax</td><td style="text-align:right;color:#2c2c2c">${invoice.tax_total:.2f}</td></tr>
-      <tr><td style="color:#1e5c3a;font-weight:bold;font-size:16px;padding-top:8px;border-top:1px solid #e8e2d9">Total</td>
-          <td style="text-align:right;color:#1e5c3a;font-weight:bold;font-size:16px;padding-top:8px;border-top:1px solid #e8e2d9">${invoice.total:.2f}</td></tr>
+
+    <!-- Top Summary Table -->
+    <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px; font-size: 14px; background-color: #f8f9fa;">
+        <thead>
+            <tr>
+                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">INVOICE #</th>
+                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">DATE</th>
+                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">PAYMENT</th>
+                <th style="padding: 12px; text-align: right; border-bottom: 2px solid #dee2e6; color: #495057;">TOTAL</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td style="padding: 12px; font-weight: 600; color: #212529;">{invoice.number}</td>
+                <td style="padding: 12px; color: #212529;">{invoice.date.strftime('%B %d, %Y')}</td>
+                <td style="padding: 12px; color: #212529;">{payment_method}</td>
+                <td style="padding: 12px; text-align: right; font-weight: 600; color: #212529;">${invoice.total:.2f}</td>
+            </tr>
+        </tbody>
     </table>
-    <div style="margin-top:26px;padding-top:16px;border-top:1px solid #e8e2d9;text-align:center;color:#9a9284;font-size:12px">
-      Thank you for your business!
+
+    <!-- Bill To -->
+    <div style="margin-bottom: 25px; font-size: 14px;">
+        <strong style="color: #495057;">BILL TO</strong><br>
+        <span style="color: #212529;">{customer_name}</span>
     </div>
-  </div>
+
+    <!-- Line Items Table -->
+    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
+        <thead>
+            <tr>
+                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #dee2e6; color: #495057;">DESCRIPTION</th>
+                <th style="padding: 10px; text-align: center; border-bottom: 2px solid #dee2e6; color: #495057;">QTY</th>
+                <th style="padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6; color: #495057;">UNIT PRICE</th>
+                <th style="padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6; color: #495057;">AMOUNT</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows}
+        </tbody>
+    </table>
+
+    <!-- Totals Area -->
+    <div style="margin-bottom: 40px; display: table; width: 100%;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin-left: auto;">
+            <tr>
+                <td style="padding: 6px 10px; text-align: right; width: 60%; color: #495057;">Subtotal</td>
+                <td style="padding: 6px 10px; text-align: right; width: 40%; color: #212529;">${invoice.subtotal:.2f}</td>
+            </tr>
+            <!-- Only show discount if it exists and is greater than 0 -->
+            {"<tr><td style='padding: 6px 10px; text-align: right; color: #495057;'>Discount</td><td style='padding: 6px 10px; text-align: right; color: #212529;'>-$" + f"{invoice.discount:.2f}" + "</td></tr>" if getattr(invoice, 'discount', 0) > 0 else ""}
+            <tr>
+                <td style="padding: 6px 10px; text-align: right; color: #495057;">Tax</td>
+                <td style="padding: 6px 10px; text-align: right; color: #212529;">${invoice.tax_total:.2f}</td>
+            </tr>
+            <tr>
+                <td style="padding: 12px 10px; text-align: right; font-weight: bold; border-top: 2px solid #dee2e6; font-size: 16px; color: #212529;">Total</td>
+                <td style="padding: 12px 10px; text-align: right; font-weight: bold; border-top: 2px solid #dee2e6; font-size: 16px; color: #212529;">${invoice.total:.2f}</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Footer -->
+    <div style="border-top: 1px solid #dee2e6; padding-top: 20px; font-size: 12px; color: #6c757d; text-align: center;">
+        <p style="margin: 0 0 8px 0; font-weight: 600; font-size: 14px; color: #495057;">Thank you for choosing {shop_name}</p>
+        <p style="margin: 0;">This invoice is designed to be printed minimally consider saving digitally where possible</p>
+    </div>
 </div>"""
 
 
