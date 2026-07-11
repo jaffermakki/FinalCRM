@@ -138,4 +138,4 @@ def send_email_receipt(db, invoice, to_email: str, get_setting) -> tuple[bool, s
         f"Date: {invoice.date.strftime('%b %d, %Y %H:%M')}\n\n"
         f"{lines_text}\n\n"
         f"Subtotal: ${invoice.subtotal:.2f}\n"
-        f"
+        
