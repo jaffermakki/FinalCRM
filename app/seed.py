@@ -32,7 +32,12 @@ def migrate_schema():
                 if col.name in existing_cols:
                     continue
                 default = _COLUMN_DEFAULTS.get(col.name, "NULL")
-                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} DEFAULT {default}'))
+                # The column's SQL type (e.g. VARCHAR, FLOAT) must be included
+                # explicitly — SQLite tolerates ADD COLUMN without one, but
+                # PostgreSQL treats it as a syntax error and refuses the
+                # statement entirely, which would crash the app on startup.
+                col_type = col.type.compile(dialect=engine.dialect)
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type} DEFAULT {default}'))
 
 
 def init_db():
